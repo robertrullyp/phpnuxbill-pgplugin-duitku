@@ -11,14 +11,7 @@ Copy **duitku.php** dan **channel_duitku.json** ke folder **system/paymentgatewa
 Copy isi folder **ui** ke folder **system/paymentgateway/ui/**
 
 
-## Author
+## UPDATES
 
-[Ibnu Maksum aka ibnux](https://github.com/ibnux)
-
-## Donations
-
-### International
-[Github Sponsor](https://github.com/sponsors/ibnux)
-
-### Indonesia
-[Trakteer iBNuX](https://trakteer.id/ibnux)
+lengkapin fungsi callback dari plugin payment gateway eksisting - duitku buat [phpnuxbill](https://github.com/hotspotbilling/phpnuxbill).
+Thanks to Mas [Ibnu Maksum aka ibnux](https://github.com/ibnux) atas karyanya.
