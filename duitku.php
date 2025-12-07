@@ -127,50 +127,150 @@ function duitku_get_status($trx, $user)
 {
     global $config;
     $json = [
-        'merchantCode' => $config['duitku_merchant_id'],
+        'merchantCode'    => $config['duitku_merchant_id'],
         'merchantOrderId' => $trx['id'],
-        'signature' => md5($config['duitku_merchant_id'] . $trx['id'] . $config['duitku_merchant_key'])
+        'signature'       => md5(
+            $config['duitku_merchant_id'] .
+            $trx['id'] .
+            $config['duitku_merchant_key']
+        ),
     ];
-    $result = json_decode(Http::postJsonData(duitku_get_server() . 'transactionStatus', $json), true);
+    $result = json_decode(
+        Http::postJsonData(duitku_get_server() . 'transactionStatus', $json),
+        true
+    );
     if ($result['reference'] != $trx['gateway_trx_id']) {
-        Message::sendTelegram("Duitku payment status failed\n\n" . json_encode($result, JSON_PRETTY_PRINT));
-        r2(U . "order/view/" . $trx['id'], 'w', Lang::T("Payment check failed."));
+        Message::sendTelegram(
+            "Duitku payment status failed\n\n" .
+            json_encode($result, JSON_PRETTY_PRINT)
+        );
+        _r2_if_not_callback(
+            U . "order/view/" . $trx['id'],
+            'w',
+            Lang::T("Payment check failed.")
+        );
+        return;
     }
     if ($result['statusCode'] == '01') {
-        r2(U . "order/view/" . $trx['id'], 'w', Lang::T("Transaction still unpaid."));
-    } else if ($result['statusCode'] == '00' && $trx['status'] != 2) {
-        if (!Package::rechargeUser($user['id'], $trx['routers'], $trx['plan_id'], $trx['gateway'],  $trx['payment_channel'])) {
-            r2(U . "order/view/" . $trx['id'], 'd', Lang::T("Failed to activate your Package, try again later."));
+        _r2_if_not_callback(
+            U . "order/view/" . $trx['id'],
+            'w',
+            Lang::T("Transaction still unpaid.")
+        );
+        return;
+    }
+    if ($result['statusCode'] == '02') {
+        $trxFresh = ORM::for_table('tbl_payment_gateway')->find_one($trx['id']);
+        if ($trxFresh) {
+            $trxFresh->pg_paid_response = json_encode($result);
+            $trxFresh->status           = 3;
+            $trxFresh->save();
         }
-
-    	// ngambil nomor invoice dr tbl_transactions
-		$inv = null;
-        $methodWant = 'duitku - ' . $trx['payment_channel'];
+        _r2_if_not_callback(
+            U . "order/view/" . $trx['id'],
+            'd',
+            Lang::T("Transaction expired or Failed.")
+        );
+        return;
+    }
+    if ($result['statusCode'] == '00') {
+        $db = ORM::get_db();
+        $stmt = $db->prepare("
+            UPDATE tbl_payment_gateway
+            SET status = 9  -- 9 = processing (sementara)
+            WHERE id = :id
+              AND gateway = 'duitku'
+              AND status NOT IN (2, 3, 9)  -- jangan sentuh yang sudah paid/failed/processing
+              AND (trx_invoice IS NULL OR trx_invoice = '')
+        ");
+        $stmt->execute([':id' => $trx['id']]);
+        if ($stmt->rowCount() === 0) {
+            _r2_if_not_callback(
+                U . "order/view/" . $trx['id'],
+                's',
+                Lang::T("Transaction has been paid.")
+            );
+            return;
+        }
+        $trxFresh = ORM::for_table('tbl_payment_gateway')->find_one($trx['id']);
+        if (!$trxFresh) {
+            Message::sendTelegram(
+                "Duitku payment status: transaction not found on refresh\n\n" .
+                json_encode([
+                    'id'        => $trx['id'],
+                    'reference' => $trx['gateway_trx_id'],
+                ], JSON_PRETTY_PRINT)
+            );
+            _r2_if_not_callback(
+                U . "order/view/" . $trx['id'],
+                'd',
+                Lang::T("Transaction not found.")
+            );
+            return;
+        }
+        if (
+            (string)$trxFresh['status'] == '2' ||
+            (string)$trxFresh['status'] === 'paid' ||
+            !empty($trxFresh['trx_invoice'])
+        ) {
+            _r2_if_not_callback(
+                U . "order/view/" . $trx['id'],
+                's',
+                Lang::T("Transaction has been paid.")
+            );
+            return;
+        }
+        if (!Package::rechargeUser(
+            $user['id'],
+            $trxFresh['routers'],
+            $trxFresh['plan_id'],
+            $trxFresh['gateway'],
+            $trxFresh['payment_channel']
+        )) {
+            _r2_if_not_callback(
+                U . "order/view/" . $trxFresh['id'],
+                'd',
+                Lang::T("Failed to activate your Package, try again later.")
+            );
+            return;
+        }
+        $inv         = null;
+        $methodWant  = 'duitku - ' . $trxFresh['payment_channel'];
         $invQ = ORM::for_table('tbl_transactions')
             ->where('user_id', (int)$user['id'])
-            ->where('price', (int)$trx['price'])
-            ->where('method', $methodWant)
+            ->where('price',   (int)$trxFresh['price'])
+            ->where('method',  $methodWant)
             ->where_like('invoice', 'INV-%')
             ->order_by_desc('id');
-		$inv = $invQ->find_one();
-		if ($inv && empty($trx->trx_invoice)) {
-		    $trx->trx_invoice = $inv['invoice'];
-		}
+        $inv = $invQ->find_one();
+        if ($inv && empty($trxFresh->trx_invoice)) {
+            $trxFresh->trx_invoice = $inv['invoice'];
+        }
+        $trxFresh->pg_paid_response = json_encode($result);
+        $trxFresh->paid_date        = date('Y-m-d H:i:s');
+        $trxFresh->status           = 2;
+        $trxFresh->save();
 
-        $trx->pg_paid_response = json_encode($result);
-        $trx->paid_date = date('Y-m-d H:i:s');
-        $trx->status = 2;
-        $trx->save();
-
-        r2(U . "order/view/" . $trx['id'], 's', Lang::T("Transaction has been paid."));
-    } else if ($result['statusCode'] == '02') {
-        $trx->pg_paid_response = json_encode($result);
-        $trx->status = 3;
-        $trx->save();
-        r2(U . "order/view/" . $trx['id'], 'd', Lang::T("Transaction expired or Failed."));
-    } else if ($trx['status'] == 2) {
-        r2(U . "order/view/" . $trx['id'], 'd', Lang::T("Transaction has been paid.."));
+        _r2_if_not_callback(
+            U . "order/view/" . $trxFresh['id'],
+            's',
+            Lang::T("Transaction has been paid.")
+        );
+        return;
     }
+    if ((string)$trx['status'] == '2' || (string)$trx['status'] === 'paid') {
+        _r2_if_not_callback(
+            U . "order/view/" . $trx['id'],
+            's',
+            Lang::T("Transaction has been paid.")
+        );
+        return;
+    }
+    _r2_if_not_callback(
+        U . "order/view/" . $trx['id'],
+        'w',
+        Lang::T("Unknown payment status.")
+    );
 }
 
 // helper
