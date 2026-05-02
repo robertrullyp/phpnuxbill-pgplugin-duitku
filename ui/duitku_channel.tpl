@@ -1,4 +1,4 @@
-{include file="user-ui/header.tpl"}
+{include file="customer/header.tpl"}
 <div class="row">
     <div class="col-sm-12">
             <div class="panel panel-info panel-hovered">
@@ -16,4 +16,4 @@
             </div>
     </div>
 </div>
-{include file="user-ui/footer.tpl"}
+{include file="customer/footer.tpl"}
