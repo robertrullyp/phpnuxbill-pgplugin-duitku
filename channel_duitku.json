@@ -1,90 +1,191 @@
 [
-	{
-		"id": "BC",
-		"name": "BCA"
-	},
-	{
-		"id": "M2",
-		"name": "Mandiri"
-	},
-	{
-		"id": "VA",
-		"name": "Maybank"
-	},
-	{
-		"id": "I1",
-		"name": "BNI"
-	},
-	{
-		"id": "B1",
-		"name": "CIMB Niaga"
-	},
-	{
-		"id": "BT",
-		"name": "Permata Bank"
-	},
-	{
-		"id": "A1",
-		"name": "ATM Bersama"
-	},
-	{
-		"id": "AG",
-		"name": "Artha Graha"
-	},
-	{
-		"id": "BR",
-		"name": "BRIVA"
-	},
-	{
-		"id": "S1",
-		"name": "Bank Sahabat Sampoerna"
-	},
-	{
-		"id": "OV",
-		"name": "OVO"
-	},
-	{
-		"id": "SA",
-		"name": "Shopee Pay"
-	},
-	{
-		"id": "LF",
-		"name": "LinkAja Apps (Fixed Fee)"
-	},
-	{
-		"id": "LA",
-		"name": "LinkAja Apps (Percentage Fee)"
-	},
-	{
-		"id": "DA",
-		"name": "DANA"
-	},
-	{
-		"id": "SP",
-		"name": "QRIS Shopee Pay"
-	},
-	{
-		"id": "LQ",
-		"name": "QRIS LinkAja"
-	},
-	{
-		"id": "NQ",
-		"name": "QRIS Nobu"
-	},
-	{
-		"id": "FT",
-		"name": "Pegadaian/ALFA/Pos"
-	},
-	{
-		"id": "A2",
-		"name": "POS Indonesia"
-	},
-	{
-		"id": "IR",
-		"name": "Indomaret"
-	},
-	{
-		"id": "VC",
-		"name": "Credit Card (Visa / Master Card / JCB)"
-	}
+  {
+    "id": "VC",
+    "name": "Credit Card (Visa / Master Card / JCB)",
+    "category": "Credit Card"
+  },
+  {
+    "id": "BC",
+    "name": "BCA Virtual Account",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "M2",
+    "name": "Mandiri Virtual Account",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "VA",
+    "name": "Maybank Virtual Account",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "I1",
+    "name": "BNI Virtual Account",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "B1",
+    "name": "CIMB Niaga Virtual Account",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "BT",
+    "name": "Permata Bank Virtual Account",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "A1",
+    "name": "ATM Bersama",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "AG",
+    "name": "Bank Artha Graha",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "NC",
+    "name": "Bank Neo Commerce/BNC",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "BR",
+    "name": "BRI BRIVA",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "S1",
+    "name": "Bank Sahabat Sampoerna",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "DM",
+    "name": "Danamon Virtual Account",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "BV",
+    "name": "BSI Virtual Account",
+    "category": "Virtual Account",
+    "min_amount": 10000
+  },
+  {
+    "id": "FT",
+    "name": "Pegadaian/ALFA/Pos",
+    "category": "Retail",
+    "min_amount": 10000,
+    "max_amount": 2500000
+  },
+  {
+    "id": "IR",
+    "name": "Indomaret",
+    "category": "Retail",
+    "min_amount": 10000,
+    "max_amount": 15000000
+  },
+  {
+    "id": "OV",
+    "name": "OVO",
+    "category": "E-Wallet"
+  },
+  {
+    "id": "SA",
+    "name": "Shopee Pay Apps",
+    "category": "E-Wallet"
+  },
+  {
+    "id": "LF",
+    "name": "LinkAja Apps (Fixed Fee)",
+    "category": "E-Wallet"
+  },
+  {
+    "id": "LA",
+    "name": "LinkAja Apps (Percentage Fee)",
+    "category": "E-Wallet"
+  },
+  {
+    "id": "DA",
+    "name": "DANA",
+    "category": "E-Wallet"
+  },
+  {
+    "id": "SL",
+    "name": "Shopee Pay Account Link",
+    "category": "E-Wallet",
+    "account_link": true
+  },
+  {
+    "id": "OL",
+    "name": "OVO Account Link",
+    "category": "E-Wallet",
+    "account_link": true
+  },
+  {
+    "id": "SP",
+    "name": "QRIS Shopee Pay",
+    "category": "QRIS"
+  },
+  {
+    "id": "NQ",
+    "name": "QRIS Nobu",
+    "category": "QRIS"
+  },
+  {
+    "id": "GQ",
+    "name": "QRIS Gudang Voucher",
+    "category": "QRIS"
+  },
+  {
+    "id": "LQ",
+    "name": "QRIS LinkAja",
+    "category": "QRIS"
+  },
+  {
+    "id": "SQ",
+    "name": "QRIS Nusapay",
+    "category": "QRIS"
+  },
+  {
+    "id": "DN",
+    "name": "Indodana Paylater",
+    "category": "Credit"
+  },
+  {
+    "id": "AT",
+    "name": "ATOME",
+    "category": "Credit"
+  },
+  {
+    "id": "JP",
+    "name": "Jenius Pay",
+    "category": "E-Banking"
+  },
+  {
+    "id": "T1",
+    "name": "Tokopedia Card Payment",
+    "category": "E-Commerce"
+  },
+  {
+    "id": "T2",
+    "name": "Tokopedia E-Wallet",
+    "category": "E-Commerce"
+  },
+  {
+    "id": "T3",
+    "name": "Tokopedia Others",
+    "category": "E-Commerce"
+  }
 ]
