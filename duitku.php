@@ -628,6 +628,46 @@ function duitku_payment_is_paid($trx)
     return $trx && ((string)$trx['status'] === '2' || !empty($trx['trx_invoice']));
 }
 
+function duitku_find_paid_invoice($trx, $user)
+{
+    $reference = trim((string)($trx['gateway_trx_id'] ?? ''));
+    $method = 'duitku - ' . (string)($trx['payment_channel'] ?? '');
+    $query = ORM::for_table('tbl_transactions')
+        ->where('user_id', (int)($user['id'] ?? 0))
+        ->where('method', $method)
+        ->where_like('invoice', 'INV-%')
+        ->order_by_desc('id');
+
+    if ($reference !== '') {
+        $byReference = clone $query;
+        $invoice = $byReference->where('note', $reference)->find_one();
+        if ($invoice) {
+            return $invoice;
+        }
+    }
+
+    $invoice = $query
+        ->where('price', (int)($trx['price'] ?? 0))
+        ->where('routers', (string)($trx['routers'] ?? ''))
+        ->find_one();
+    return $invoice ?: null;
+}
+
+function duitku_mark_paid_transaction($trx, $result, $invoice = '')
+{
+    if (!$trx) {
+        return false;
+    }
+    if ((string)$invoice !== '' && empty($trx->trx_invoice)) {
+        $trx->trx_invoice = (string)$invoice;
+    }
+    $trx->pg_paid_response = json_encode($result, JSON_UNESCAPED_SLASHES);
+    $trx->paid_date = date('Y-m-d H:i:s');
+    $trx->status = 2;
+    $trx->save();
+    return true;
+}
+
 function duitku_finish_paid_transaction($trx, $user, $result)
 {
     $trxId = (int)($trx['id'] ?? 0);
@@ -655,11 +695,25 @@ function duitku_finish_paid_transaction($trx, $user, $result)
             return CustomerVoucherCatalog::markPaymentPaid($trx, $user, $result, $voucherError);
         }
 
+        $existingInvoice = duitku_find_paid_invoice($trx, $user);
+        if ($existingInvoice) {
+            return duitku_mark_paid_transaction($trx, $result, (string)$existingInvoice['invoice']);
+        }
+
         $note = (string)($trx['gateway_trx_id'] ?? '');
         $previousGlobalTrx = $GLOBALS['trx'] ?? null;
         $GLOBALS['trx'] = $trx;
         try {
             $invoice = Package::rechargeUser($user['id'], $trx['routers'], $trx['plan_id'], $trx['gateway'], $trx['payment_channel'], $note);
+        } catch (Throwable $e) {
+            $existingInvoice = duitku_find_paid_invoice($trx, $user);
+            if ($existingInvoice) {
+                return duitku_mark_paid_transaction($trx, $result, (string)$existingInvoice['invoice']);
+            }
+            if (class_exists('Message')) {
+                Message::sendTelegram("Duitku payment activation failed\n\n" . $e->getMessage());
+            }
+            return false;
         } finally {
             if ($previousGlobalTrx !== null) {
                 $GLOBALS['trx'] = $previousGlobalTrx;
@@ -669,6 +723,10 @@ function duitku_finish_paid_transaction($trx, $user, $result)
         }
 
         if (!$invoice) {
+            $existingInvoice = duitku_find_paid_invoice($trx, $user);
+            if ($existingInvoice) {
+                return duitku_mark_paid_transaction($trx, $result, (string)$existingInvoice['invoice']);
+            }
             return false;
         }
 
@@ -689,11 +747,7 @@ function duitku_finish_paid_transaction($trx, $user, $result)
             }
         }
 
-        $trx->pg_paid_response = json_encode($result, JSON_UNESCAPED_SLASHES);
-        $trx->paid_date = date('Y-m-d H:i:s');
-        $trx->status = 2;
-        $trx->save();
-        return true;
+        return duitku_mark_paid_transaction($trx, $result, (string)$trx->trx_invoice);
     } finally {
         duitku_release_payment_lock($lock);
     }
