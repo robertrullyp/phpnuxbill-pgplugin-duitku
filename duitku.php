@@ -428,7 +428,17 @@ function duitku_pop_headers()
 function duitku_selected_channel()
 {
     global $routes;
-    $channel = trim((string)_post('duitku_channel'));
+    if (class_exists('PaymentGateway')) {
+        $channel = PaymentGateway::selectedPaymentChannel('duitku');
+        if ($channel !== '') {
+            return $channel;
+        }
+    }
+
+    $channel = trim((string)_post('payment_channel'));
+    if ($channel === '') {
+        $channel = trim((string)_post('duitku_channel'));
+    }
     if ($channel === '' && !empty($routes[4])) {
         $channel = trim((string)$routes[4]);
     }
@@ -550,56 +560,181 @@ function duitku_no_redirect()
     return defined('IS_GATEWAY_CALLBACK') && IS_GATEWAY_CALLBACK;
 }
 
+function duitku_lock_name($trxId)
+{
+    return 'phpnuxbill_duitku_' . (int)$trxId;
+}
+
+function duitku_acquire_payment_lock($trxId, $timeout = 30)
+{
+    $lockName = duitku_lock_name($trxId);
+    try {
+        $db = ORM::get_db();
+        $stmt = $db->prepare('SELECT GET_LOCK(?, ?)');
+        if ($stmt && $stmt->execute([$lockName, max(1, (int)$timeout)])) {
+            $result = $stmt->fetchColumn();
+            return ((string)$result === '1') ? ['type' => 'mysql', 'name' => $lockName] : false;
+        }
+        return false;
+    } catch (Throwable $e) {
+        $path = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $lockName . '.lock';
+        $handle = @fopen($path, 'c');
+        if (!$handle) {
+            return false;
+        }
+        $start = time();
+        do {
+            if (@flock($handle, LOCK_EX | LOCK_NB)) {
+                return ['type' => 'file', 'handle' => $handle];
+            }
+            usleep(100000);
+        } while ((time() - $start) < max(1, (int)$timeout));
+        @fclose($handle);
+        return false;
+    }
+}
+
+function duitku_release_payment_lock($lock)
+{
+    if (!is_array($lock)) {
+        return;
+    }
+    if (($lock['type'] ?? '') === 'mysql' && !empty($lock['name'])) {
+        try {
+            $stmt = ORM::get_db()->prepare('SELECT RELEASE_LOCK(?)');
+            if ($stmt) {
+                $stmt->execute([$lock['name']]);
+            }
+        } catch (Throwable $e) {
+        }
+        return;
+    }
+    if (($lock['type'] ?? '') === 'file' && !empty($lock['handle'])) {
+        @flock($lock['handle'], LOCK_UN);
+        @fclose($lock['handle']);
+    }
+}
+
+function duitku_payment_row($trxId)
+{
+    return ORM::for_table('tbl_payment_gateway')
+        ->where('gateway', 'duitku')
+        ->where('id', (int)$trxId)
+        ->find_one();
+}
+
+function duitku_payment_is_paid($trx)
+{
+    return $trx && ((string)$trx['status'] === '2' || !empty($trx['trx_invoice']));
+}
+
 function duitku_finish_paid_transaction($trx, $user, $result)
 {
-    if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
-        $voucherError = '';
-        return CustomerVoucherCatalog::markPaymentPaid($trx, $user, $result, $voucherError);
-    }
-
-    if ((string)$trx['status'] === '2' || !empty($trx['trx_invoice'])) {
-        return true;
-    }
-
-    $note = (string)($trx['gateway_trx_id'] ?? '');
-    $previousGlobalTrx = $GLOBALS['trx'] ?? null;
-    $GLOBALS['trx'] = $trx;
-    try {
-        $invoice = Package::rechargeUser($user['id'], $trx['routers'], $trx['plan_id'], $trx['gateway'], $trx['payment_channel'], $note);
-    } finally {
-        if ($previousGlobalTrx !== null) {
-            $GLOBALS['trx'] = $previousGlobalTrx;
-        } else {
-            unset($GLOBALS['trx']);
-        }
-    }
-
-    if (!$invoice) {
+    $trxId = (int)($trx['id'] ?? 0);
+    if ($trxId < 1) {
         return false;
     }
 
-    if (empty($trx->trx_invoice)) {
-        $trx->trx_invoice = is_string($invoice) ? $invoice : '';
+    $lock = duitku_acquire_payment_lock($trxId);
+    if (!$lock) {
+        $freshTrx = duitku_payment_row($trxId);
+        return duitku_payment_is_paid($freshTrx);
     }
 
-    if (empty($trx->trx_invoice)) {
-        $inv = ORM::for_table('tbl_transactions')
-            ->where('user_id', (int)$user['id'])
-            ->where('price', (int)$trx['price'])
-            ->where('method', 'duitku - ' . $trx['payment_channel'])
-            ->where_like('invoice', 'INV-%')
-            ->order_by_desc('id')
-            ->find_one();
-        if ($inv) {
-            $trx->trx_invoice = $inv['invoice'];
+    try {
+        $trx = duitku_payment_row($trxId);
+        if (!$trx) {
+            return false;
         }
+        if (duitku_payment_is_paid($trx)) {
+            return true;
+        }
+
+        if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+            $voucherError = '';
+            return CustomerVoucherCatalog::markPaymentPaid($trx, $user, $result, $voucherError);
+        }
+
+        $note = (string)($trx['gateway_trx_id'] ?? '');
+        $previousGlobalTrx = $GLOBALS['trx'] ?? null;
+        $GLOBALS['trx'] = $trx;
+        try {
+            $invoice = Package::rechargeUser($user['id'], $trx['routers'], $trx['plan_id'], $trx['gateway'], $trx['payment_channel'], $note);
+        } finally {
+            if ($previousGlobalTrx !== null) {
+                $GLOBALS['trx'] = $previousGlobalTrx;
+            } else {
+                unset($GLOBALS['trx']);
+            }
+        }
+
+        if (!$invoice) {
+            return false;
+        }
+
+        if (empty($trx->trx_invoice)) {
+            $trx->trx_invoice = is_string($invoice) ? $invoice : '';
+        }
+
+        if (empty($trx->trx_invoice)) {
+            $inv = ORM::for_table('tbl_transactions')
+                ->where('user_id', (int)$user['id'])
+                ->where('price', (int)$trx['price'])
+                ->where('method', 'duitku - ' . $trx['payment_channel'])
+                ->where_like('invoice', 'INV-%')
+                ->order_by_desc('id')
+                ->find_one();
+            if ($inv) {
+                $trx->trx_invoice = $inv['invoice'];
+            }
+        }
+
+        $trx->pg_paid_response = json_encode($result, JSON_UNESCAPED_SLASHES);
+        $trx->paid_date = date('Y-m-d H:i:s');
+        $trx->status = 2;
+        $trx->save();
+        return true;
+    } finally {
+        duitku_release_payment_lock($lock);
+    }
+}
+
+function duitku_mark_failed_transaction($trx, $result)
+{
+    $trxId = (int)($trx['id'] ?? 0);
+    if ($trxId < 1) {
+        return false;
     }
 
-    $trx->pg_paid_response = json_encode($result, JSON_UNESCAPED_SLASHES);
-    $trx->paid_date = date('Y-m-d H:i:s');
-    $trx->status = 2;
-    $trx->save();
-    return true;
+    $lock = duitku_acquire_payment_lock($trxId);
+    if (!$lock) {
+        $freshTrx = duitku_payment_row($trxId);
+        return duitku_payment_is_paid($freshTrx);
+    }
+
+    try {
+        $trx = duitku_payment_row($trxId);
+        if (!$trx) {
+            return false;
+        }
+        if (duitku_payment_is_paid($trx)) {
+            return true;
+        }
+
+        if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+            CustomerVoucherCatalog::markPaymentFailed($trx, CustomerVoucherCatalog::ORDER_FAILED);
+            $trx = duitku_payment_row($trxId);
+        }
+
+        if ($trx && !duitku_payment_is_paid($trx)) {
+            $trx->pg_paid_response = json_encode($result, JSON_UNESCAPED_SLASHES);
+            $trx->status = 3;
+            $trx->save();
+        }
+        return false;
+    } finally {
+        duitku_release_payment_lock($lock);
+    }
 }
 
 function duitku_apply_status_result($trx, $user, $result)
@@ -634,12 +769,13 @@ function duitku_apply_status_result($trx, $user, $result)
     }
 
     if ($statusCode === '02' && (string)$trx['status'] !== '2') {
-        if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
-            CustomerVoucherCatalog::markPaymentFailed($trx, CustomerVoucherCatalog::ORDER_FAILED);
+        $alreadyPaid = duitku_mark_failed_transaction($trx, $result);
+        if ($alreadyPaid) {
+            if (!duitku_no_redirect()) {
+                r2(duitku_retry_url($trx), 's', Lang::T("Transaction has been paid."));
+            }
+            return true;
         }
-        $trx->pg_paid_response = json_encode($result, JSON_UNESCAPED_SLASHES);
-        $trx->status = 3;
-        $trx->save();
         if (!duitku_no_redirect()) {
             r2(duitku_retry_url($trx), 'd', Lang::T("Transaction expired or Failed."));
         }
@@ -786,9 +922,7 @@ function duitku_payment_notification()
         return;
     }
 
-    $trx->pg_paid_response = json_encode(['callback' => $post], JSON_UNESCAPED_SLASHES);
-    $trx->status = 3;
-    $trx->save();
+    duitku_mark_failed_transaction($trx, ['callback' => $post]);
     echo 'OK';
 }
 
