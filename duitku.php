@@ -367,7 +367,9 @@ function duitku_transaction_payload($trx, $user, $paymentMethod = '')
         ],
         'customerDetail' => duitku_customer_detail($user),
         'callbackUrl' => U . 'callback/duitku',
-        'returnUrl' => U . 'order/view/' . $trx['id'] . '/check',
+        'returnUrl' => (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx))
+            ? CustomerVoucherCatalog::gatewayReturnUrl($trx) . '/check'
+            : U . 'order/view/' . $trx['id'] . '/check',
     ];
 
     if ($settings['expiry_period'] > 0) {
@@ -478,6 +480,10 @@ function duitku_store_gateway_response($trx, $requestPayload, $response, $paymen
 
 function duitku_retry_url($trx)
 {
+    if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+        return CustomerVoucherCatalog::gatewayReturnUrl($trx);
+    }
+
     $planId = (int)($trx['plan_id'] ?? 0);
     if ($planId > 0) {
         return U . 'order/gateway/' . $trx['routers_id'] . '/' . $planId;
@@ -491,6 +497,9 @@ function duitku_create_transaction($trx, $user)
     $settings = duitku_get_settings();
     $mode = $settings['integration_mode'];
     if (!duitku_amount_supported($trx['price'])) {
+        if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+            CustomerVoucherCatalog::markPaymentFailed($trx, CustomerVoucherCatalog::ORDER_FAILED);
+        }
         r2(
             duitku_retry_url($trx),
             'w',
@@ -504,14 +513,20 @@ function duitku_create_transaction($trx, $user)
         $result = $response['data'];
         if (empty($result['paymentUrl']) || empty($result['reference']) || ($result['statusCode'] ?? '') !== '00') {
             Message::sendTelegram("Duitku POP payment failed\n\n" . json_encode($result, JSON_PRETTY_PRINT));
+            if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+                CustomerVoucherCatalog::markPaymentFailed($trx, CustomerVoucherCatalog::ORDER_FAILED);
+            }
             r2(duitku_retry_url($trx), 'e', Lang::T("Failed to create transaction."));
         }
         duitku_store_gateway_response($trx, $payload, $result, 'POP', 'Duitku POP');
-        r2(U . 'order/view/' . $trx['id'], 's', Lang::T("Create Transaction Success"));
+        r2((class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) ? CustomerVoucherCatalog::gatewayReturnUrl($trx) : U . 'order/view/' . $trx['id'], 's', Lang::T("Create Transaction Success"));
     }
 
     $paymentMethod = duitku_selected_channel();
     if ($paymentMethod === '' || !duitku_channel_allowed($paymentMethod, $trx['price'])) {
+        if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+            CustomerVoucherCatalog::markPaymentFailed($trx, CustomerVoucherCatalog::ORDER_FAILED);
+        }
         r2(duitku_retry_url($trx), 'w', Lang::T("Please select Payment Channel"));
     }
 
@@ -520,11 +535,14 @@ function duitku_create_transaction($trx, $user)
     $result = $response['data'];
     if (empty($result['paymentUrl']) || empty($result['reference'])) {
         Message::sendTelegram("Duitku payment failed\n\n" . json_encode($result, JSON_PRETTY_PRINT));
+        if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+            CustomerVoucherCatalog::markPaymentFailed($trx, CustomerVoucherCatalog::ORDER_FAILED);
+        }
         r2(duitku_retry_url($trx), 'e', Lang::T("Failed to create transaction."));
     }
 
     duitku_store_gateway_response($trx, $payload, $result, $paymentMethod, duitku_channel_name($paymentMethod));
-    r2(U . 'order/view/' . $trx['id'], 's', Lang::T("Create Transaction Success"));
+    r2((class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) ? CustomerVoucherCatalog::gatewayReturnUrl($trx) : U . 'order/view/' . $trx['id'], 's', Lang::T("Create Transaction Success"));
 }
 
 function duitku_no_redirect()
@@ -534,6 +552,11 @@ function duitku_no_redirect()
 
 function duitku_finish_paid_transaction($trx, $user, $result)
 {
+    if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+        $voucherError = '';
+        return CustomerVoucherCatalog::markPaymentPaid($trx, $user, $result, $voucherError);
+    }
+
     if ((string)$trx['status'] === '2' || !empty($trx['trx_invoice'])) {
         return true;
     }
@@ -584,7 +607,7 @@ function duitku_apply_status_result($trx, $user, $result)
     if (empty($result['reference']) || (string)$result['reference'] !== (string)$trx['gateway_trx_id']) {
         Message::sendTelegram("Duitku payment status failed\n\n" . json_encode($result, JSON_PRETTY_PRINT));
         if (!duitku_no_redirect()) {
-            r2(U . 'order/view/' . $trx['id'], 'w', Lang::T("Payment check failed."));
+            r2(duitku_retry_url($trx), 'w', Lang::T("Payment check failed."));
         }
         return false;
     }
@@ -592,7 +615,7 @@ function duitku_apply_status_result($trx, $user, $result)
     $statusCode = (string)($result['statusCode'] ?? '');
     if ($statusCode === '01') {
         if (!duitku_no_redirect()) {
-            r2(U . 'order/view/' . $trx['id'], 'w', Lang::T("Transaction still unpaid."));
+            r2(duitku_retry_url($trx), 'w', Lang::T("Transaction still unpaid."));
         }
         return false;
     }
@@ -600,28 +623,31 @@ function duitku_apply_status_result($trx, $user, $result)
     if ($statusCode === '00') {
         if (!duitku_finish_paid_transaction($trx, $user, $result)) {
             if (!duitku_no_redirect()) {
-                r2(U . 'order/view/' . $trx['id'], 'd', Lang::T("Failed to activate your Package, try again later."));
+                r2(duitku_retry_url($trx), 'd', Lang::T("Failed to activate your Package, try again later."));
             }
             return false;
         }
         if (!duitku_no_redirect()) {
-            r2(U . 'order/view/' . $trx['id'], 's', Lang::T("Transaction has been paid."));
+            r2(duitku_retry_url($trx), 's', Lang::T("Transaction has been paid."));
         }
         return true;
     }
 
     if ($statusCode === '02' && (string)$trx['status'] !== '2') {
+        if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+            CustomerVoucherCatalog::markPaymentFailed($trx, CustomerVoucherCatalog::ORDER_FAILED);
+        }
         $trx->pg_paid_response = json_encode($result, JSON_UNESCAPED_SLASHES);
         $trx->status = 3;
         $trx->save();
         if (!duitku_no_redirect()) {
-            r2(U . 'order/view/' . $trx['id'], 'd', Lang::T("Transaction expired or Failed."));
+            r2(duitku_retry_url($trx), 'd', Lang::T("Transaction expired or Failed."));
         }
         return false;
     }
 
     if ((string)$trx['status'] === '2' && !duitku_no_redirect()) {
-        r2(U . 'order/view/' . $trx['id'], 's', Lang::T("Transaction has been paid."));
+        r2(duitku_retry_url($trx), 's', Lang::T("Transaction has been paid."));
     }
 
     return (string)$trx['status'] === '2';
