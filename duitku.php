@@ -502,6 +502,20 @@ function duitku_retry_url($trx)
     return U . 'order/balance';
 }
 
+function duitku_payment_status_url($trx)
+{
+    if (class_exists('CustomerVoucherCatalog') && CustomerVoucherCatalog::isVoucherPayment($trx)) {
+        return CustomerVoucherCatalog::gatewayReturnUrl($trx);
+    }
+
+    $trxId = (int)($trx['id'] ?? 0);
+    if ($trxId > 0) {
+        return U . 'order/view/' . $trxId;
+    }
+
+    return duitku_retry_url($trx);
+}
+
 function duitku_create_transaction($trx, $user)
 {
     $settings = duitku_get_settings();
@@ -793,10 +807,11 @@ function duitku_mark_failed_transaction($trx, $result)
 
 function duitku_apply_status_result($trx, $user, $result)
 {
+    $statusUrl = duitku_payment_status_url($trx);
     if (empty($result['reference']) || (string)$result['reference'] !== (string)$trx['gateway_trx_id']) {
         Message::sendTelegram("Duitku payment status failed\n\n" . json_encode($result, JSON_PRETTY_PRINT));
         if (!duitku_no_redirect()) {
-            r2(duitku_retry_url($trx), 'w', Lang::T("Payment check failed."));
+            r2($statusUrl, 'w', Lang::T("Payment check failed."));
         }
         return false;
     }
@@ -804,7 +819,7 @@ function duitku_apply_status_result($trx, $user, $result)
     $statusCode = (string)($result['statusCode'] ?? '');
     if ($statusCode === '01') {
         if (!duitku_no_redirect()) {
-            r2(duitku_retry_url($trx), 'w', Lang::T("Transaction still unpaid."));
+            r2($statusUrl, 'w', Lang::T("Transaction still unpaid."));
         }
         return false;
     }
@@ -812,12 +827,12 @@ function duitku_apply_status_result($trx, $user, $result)
     if ($statusCode === '00') {
         if (!duitku_finish_paid_transaction($trx, $user, $result)) {
             if (!duitku_no_redirect()) {
-                r2(duitku_retry_url($trx), 'd', Lang::T("Failed to activate your Package, try again later."));
+                r2($statusUrl, 'd', Lang::T("Failed to activate your Package, try again later."));
             }
             return false;
         }
         if (!duitku_no_redirect()) {
-            r2(duitku_retry_url($trx), 's', Lang::T("Transaction has been paid."));
+            r2($statusUrl, 's', Lang::T("Transaction has been paid."));
         }
         return true;
     }
@@ -826,18 +841,18 @@ function duitku_apply_status_result($trx, $user, $result)
         $alreadyPaid = duitku_mark_failed_transaction($trx, $result);
         if ($alreadyPaid) {
             if (!duitku_no_redirect()) {
-                r2(duitku_retry_url($trx), 's', Lang::T("Transaction has been paid."));
+                r2($statusUrl, 's', Lang::T("Transaction has been paid."));
             }
             return true;
         }
         if (!duitku_no_redirect()) {
-            r2(duitku_retry_url($trx), 'd', Lang::T("Transaction expired or Failed."));
+            r2($statusUrl, 'd', Lang::T("Transaction expired or Failed."));
         }
         return false;
     }
 
     if ((string)$trx['status'] === '2' && !duitku_no_redirect()) {
-        r2(duitku_retry_url($trx), 's', Lang::T("Transaction has been paid."));
+        r2($statusUrl, 's', Lang::T("Transaction has been paid."));
     }
 
     return (string)$trx['status'] === '2';
