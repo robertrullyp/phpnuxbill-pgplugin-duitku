@@ -471,17 +471,25 @@ function duitku_store_gateway_response($trx, $requestPayload, $response, $paymen
     $settings = duitku_get_settings();
     $reference = (string)($response['reference'] ?? '');
     $paymentUrl = (string)($response['paymentUrl'] ?? '');
+    $existingRequest = json_decode((string)($trx['pg_request'] ?? ''), true);
+    $localBilling = is_array($existingRequest) && isset($existingRequest['local_billing']) && is_array($existingRequest['local_billing'])
+        ? $existingRequest['local_billing']
+        : null;
 
     $trx->gateway_trx_id = $reference;
     $trx->pg_url_payment = $paymentUrl;
     $trx->payment_method = $paymentMethod;
     $trx->payment_channel = $paymentChannel;
-    $trx->pg_request = json_encode([
+    $requestLog = [
         'environment' => $settings['environment'],
         'integration_mode' => $settings['integration_mode'],
         'request' => $requestPayload,
         'response' => $response,
-    ], JSON_UNESCAPED_SLASHES);
+    ];
+    if ($localBilling !== null) {
+        $requestLog['local_billing'] = $localBilling;
+    }
+    $trx->pg_request = json_encode($requestLog, JSON_UNESCAPED_SLASHES);
 
     $expiryMinutes = $settings['expiry_period'] > 0 ? $settings['expiry_period'] : 1440;
     $trx->expired_date = date('Y-m-d H:i:s', strtotime('+' . $expiryMinutes . ' minutes'));
