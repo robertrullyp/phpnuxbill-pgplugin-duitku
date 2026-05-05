@@ -653,25 +653,32 @@ function duitku_payment_is_paid($trx)
 function duitku_find_paid_invoice($trx, $user)
 {
     $reference = trim((string)($trx['gateway_trx_id'] ?? ''));
-    $method = 'duitku - ' . (string)($trx['payment_channel'] ?? '');
-    $query = ORM::for_table('tbl_transactions')
-        ->where('user_id', (int)($user['id'] ?? 0))
-        ->where('method', $method)
-        ->where_like('invoice', 'INV-%')
-        ->order_by_desc('id');
-
-    if ($reference !== '') {
-        $byReference = clone $query;
-        $invoice = $byReference->where('note', $reference)->find_one();
-        if ($invoice) {
-            return $invoice;
-        }
+    if ($reference === '') {
+        return null;
     }
 
-    $invoice = $query
-        ->where('price', (int)($trx['price'] ?? 0))
-        ->where('routers', (string)($trx['routers'] ?? ''))
-        ->find_one();
+    $query = ORM::for_table('tbl_transactions')
+        ->where_like('note', $reference . '%')
+        ->where_like('invoice', 'INV-%');
+
+    if ((int)($user['id'] ?? 0) > 0) {
+        $query->where('user_id', (int)$user['id']);
+    }
+
+    $method = 'duitku - ' . (string)($trx['payment_channel'] ?? '');
+    if ($method !== 'duitku - ') {
+        $query->where('method', $method);
+    }
+
+    if ((string)($trx['routers'] ?? '') !== '') {
+        $query->where('routers', (string)$trx['routers']);
+    }
+
+    if ((int)($trx['price'] ?? 0) > 0) {
+        $query->where('price', (int)$trx['price']);
+    }
+
+    $invoice = $query->order_by_desc('id')->find_one();
     return $invoice ?: null;
 }
 
@@ -688,6 +695,20 @@ function duitku_mark_paid_transaction($trx, $result, $invoice = '')
     $trx->status = 2;
     $trx->save();
     return true;
+}
+
+function duitku_payment_user($trx)
+{
+    if (!$trx) {
+        return null;
+    }
+    if (!empty($trx['user_id'])) {
+        $user = ORM::for_table('tbl_customers')->find_one((int)$trx['user_id']);
+        if ($user) {
+            return $user;
+        }
+    }
+    return ORM::for_table('tbl_customers')->where('username', $trx['username'])->find_one();
 }
 
 function duitku_finish_paid_transaction($trx, $user, $result)
@@ -720,6 +741,20 @@ function duitku_finish_paid_transaction($trx, $user, $result)
         $existingInvoice = duitku_find_paid_invoice($trx, $user);
         if ($existingInvoice) {
             return duitku_mark_paid_transaction($trx, $result, (string)$existingInvoice['invoice']);
+        }
+
+        if ((int)($trx['plan_id'] ?? 0) < 1) {
+            if (class_exists('Message')) {
+                Message::sendTelegram("Duitku payment activation failed\n\nMissing plan id for transaction #" . $trxId);
+            }
+            return false;
+        }
+        $plan = ORM::for_table('tbl_plans')->find_one((int)$trx['plan_id']);
+        if (!$plan || (string)($plan['enabled'] ?? '') !== '1') {
+            if (class_exists('Message')) {
+                Message::sendTelegram("Duitku payment activation failed\n\nPlan not available for transaction #" . $trxId);
+            }
+            return false;
         }
 
         $note = (string)($trx['gateway_trx_id'] ?? '');
@@ -756,23 +791,33 @@ function duitku_finish_paid_transaction($trx, $user, $result)
             $trx->trx_invoice = is_string($invoice) ? $invoice : '';
         }
 
-        if (empty($trx->trx_invoice)) {
-            $inv = ORM::for_table('tbl_transactions')
-                ->where('user_id', (int)$user['id'])
-                ->where('price', (int)$trx['price'])
-                ->where('method', 'duitku - ' . $trx['payment_channel'])
-                ->where_like('invoice', 'INV-%')
-                ->order_by_desc('id')
-                ->find_one();
-            if ($inv) {
-                $trx->trx_invoice = $inv['invoice'];
-            }
-        }
-
         return duitku_mark_paid_transaction($trx, $result, (string)$trx->trx_invoice);
     } finally {
         duitku_release_payment_lock($lock);
     }
+}
+
+function duitku_finish_paid_transaction_with_recovery($trx, $user, $result)
+{
+    if (!$trx || !$user) {
+        return false;
+    }
+
+    if (duitku_finish_paid_transaction($trx, $user, $result)) {
+        return true;
+    }
+
+    $freshTrx = duitku_payment_row((int)($trx['id'] ?? 0));
+    if (duitku_payment_is_paid($freshTrx)) {
+        return true;
+    }
+
+    $existingInvoice = duitku_find_paid_invoice($freshTrx ?: $trx, $user);
+    if ($existingInvoice && $freshTrx) {
+        return duitku_mark_paid_transaction($freshTrx, $result, (string)$existingInvoice['invoice']);
+    }
+
+    return false;
 }
 
 function duitku_mark_failed_transaction($trx, $result)
@@ -833,7 +878,7 @@ function duitku_apply_status_result($trx, $user, $result)
     }
 
     if ($statusCode === '00') {
-        if (!duitku_finish_paid_transaction($trx, $user, $result)) {
+        if (!duitku_finish_paid_transaction_with_recovery($trx, $user, $result)) {
             if (!duitku_no_redirect()) {
                 r2($statusUrl, 'd', Lang::T("Failed to activate your Package, try again later."));
             }
@@ -866,7 +911,7 @@ function duitku_apply_status_result($trx, $user, $result)
     return (string)$trx['status'] === '2';
 }
 
-function duitku_get_status($trx, $user)
+function duitku_fetch_transaction_status($trx)
 {
     $settings = duitku_get_settings();
     $payload = [
@@ -875,8 +920,116 @@ function duitku_get_status($trx, $user)
         'signature' => md5($settings['merchant_id'] . $trx['id'] . $settings['merchant_key']),
     ];
     $response = duitku_post_json(duitku_endpoint('transaction_status'), $payload);
-    $result = $response['data'];
+    return $response['data'];
+}
+
+function duitku_get_status($trx, $user)
+{
+    $result = duitku_fetch_transaction_status($trx);
     return duitku_apply_status_result($trx, $user, $result);
+}
+
+function duitku_reconcile_status_result($trx, $result, $source = 'cron')
+{
+    if (!$trx) {
+        return ['status' => 'missing'];
+    }
+
+    $trxId = (int)($trx['id'] ?? 0);
+    $reference = (string)($result['reference'] ?? '');
+    if ($reference === '' || $reference !== (string)$trx['gateway_trx_id']) {
+        return [
+            'status' => 'reference_mismatch',
+            'trx_id' => $trxId,
+            'status_code' => (string)($result['statusCode'] ?? ''),
+        ];
+    }
+
+    if (isset($result['amount']) && (int)round((float)$result['amount']) !== (int)round((float)$trx['price'])) {
+        return [
+            'status' => 'amount_mismatch',
+            'trx_id' => $trxId,
+            'status_code' => (string)($result['statusCode'] ?? ''),
+        ];
+    }
+
+    $statusCode = (string)($result['statusCode'] ?? '');
+    if ($statusCode === '00') {
+        $user = duitku_payment_user($trx);
+        if (!$user) {
+            return ['status' => 'user_missing', 'trx_id' => $trxId, 'status_code' => $statusCode];
+        }
+        if (duitku_finish_paid_transaction_with_recovery($trx, $user, $result)) {
+            return ['status' => 'paid', 'trx_id' => $trxId, 'status_code' => $statusCode];
+        }
+        if (class_exists('Message')) {
+            Message::sendTelegram("Duitku {$source} reconciliation failed\n\nTransaction ID: " . $trxId);
+        }
+        return ['status' => 'activation_failed', 'trx_id' => $trxId, 'status_code' => $statusCode];
+    }
+
+    if ($statusCode === '01') {
+        return ['status' => 'pending', 'trx_id' => $trxId, 'status_code' => $statusCode];
+    }
+
+    if ($statusCode === '02') {
+        if ((string)$trx['status'] === '1') {
+            duitku_mark_failed_transaction($trx, $result);
+        }
+        return ['status' => 'failed_or_expired', 'trx_id' => $trxId, 'status_code' => $statusCode];
+    }
+
+    return ['status' => 'unknown', 'trx_id' => $trxId, 'status_code' => $statusCode];
+}
+
+function duitku_reconcile_pending_transactions($limit = 25, $includeAll = false, $recentDays = 3)
+{
+    $limit = max(1, min(200, (int)$limit));
+    $recentDays = max(1, min(30, (int)$recentDays));
+    $query = ORM::for_table('tbl_payment_gateway')
+        ->where('gateway', 'duitku')
+        ->where_not_equal('status', 2)
+        ->where_not_equal('gateway_trx_id', '')
+        ->order_by_desc('id')
+        ->limit($limit);
+
+    if (!$includeAll) {
+        $query->where_raw(
+            "(`status` = 1 OR `created_date` >= ?)",
+            [date('Y-m-d H:i:s', strtotime('-' . $recentDays . ' days'))]
+        );
+    }
+
+    $summary = [
+        'checked' => 0,
+        'paid' => 0,
+        'pending' => 0,
+        'failed_or_expired' => 0,
+        'activation_failed' => 0,
+        'skipped' => 0,
+        'errors' => [],
+    ];
+
+    foreach ($query->find_many() as $trx) {
+        $summary['checked']++;
+        try {
+            $result = duitku_fetch_transaction_status($trx);
+            $reconcile = duitku_reconcile_status_result($trx, $result, 'cron');
+            $status = (string)($reconcile['status'] ?? 'unknown');
+            if (isset($summary[$status])) {
+                $summary[$status]++;
+            } else {
+                $summary['skipped']++;
+            }
+        } catch (Throwable $e) {
+            $summary['errors'][] = [
+                'trx_id' => (int)($trx['id'] ?? 0),
+                'message' => $e->getMessage(),
+            ];
+        }
+    }
+
+    return $summary;
 }
 
 function duitku_parse_callback_payload()
@@ -992,8 +1145,11 @@ function duitku_payment_notification()
             'statusMessage' => 'SUCCESS',
             'callback' => $post,
         ];
-        if (!duitku_finish_paid_transaction($trx, $user, $result)) {
+        if (!duitku_finish_paid_transaction_with_recovery($trx, $user, $result)) {
             $logOnce('Finishing did not mark paid', ['trxId' => $trx['id']]);
+            http_response_code(500);
+            echo 'FAILED';
+            return;
         }
         echo 'OK';
         return;
