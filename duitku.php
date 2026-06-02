@@ -494,6 +494,17 @@ function duitku_store_gateway_response($trx, $requestPayload, $response, $paymen
     $expiryMinutes = $settings['expiry_period'] > 0 ? $settings['expiry_period'] : 1440;
     $trx->expired_date = date('Y-m-d H:i:s', strtotime('+' . $expiryMinutes . ' minutes'));
     $trx->save();
+
+    if ($paymentUrl !== '' && class_exists('RouterService')) {
+        try {
+            $allowResult = RouterService::allowPppoeCaptivePaymentUrl($paymentUrl, (int)($trx['routers_id'] ?? 0));
+            if (empty($allowResult['ok']) && !empty($allowResult['message'])) {
+                error_log('Duitku captive payment allow-list warning: ' . $allowResult['message']);
+            }
+        } catch (Throwable $e) {
+            error_log('Duitku captive payment allow-list failed: ' . $e->getMessage());
+        }
+    }
 }
 
 function duitku_retry_url($trx)
