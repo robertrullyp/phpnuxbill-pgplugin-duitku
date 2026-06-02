@@ -89,10 +89,9 @@
                         </div>
                     </div>
 
-                    <pre>/ip hotspot walled-garden
-add dst-host=duitku.com
-add dst-host=*.duitku.com</pre>
-                    <small class="form-text text-muted">{Lang::T('Set Telegram Bot to get any error and notification')}</small>
+                    <div class="alert alert-info">
+                        {Lang::T('Duitku domains are automatically added to Hotspot Walled Garden when Hotspot server settings are synced.')}
+                    </div>
                 </div>
             </div>
         </div>
